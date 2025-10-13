@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <title>CommService Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --bg:#0b1020; --card:#12193a; --muted:#9db0ff; --text:#e8ecff; --accent:#6ea8fe; --ok:#2ecc71; --err:#ff6b6b; }
+    * { box-sizing: border-box }
+    body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; background: var(--bg); color: var(--text); }
+    header { padding: 20px; border-bottom: 1px solid #233170; }
+    h1 { margin:0 0 4px 0; font-size: 20px; }
+    .muted { color: var(--muted); font-size: 13px; }
+    .wrap { padding: 16px; display: grid; gap: 16px;}
+    .row { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit,minmax(260px,1fr)); }
+    .card { background: var(--card); border:1px solid #233170; border-radius: 14px; padding: 14px; box-shadow: 0 6px 24px rgba(10,14,40,.25); }
+    .kpi { display:flex; align-items:center; justify-content:space-between; }
+    .kpi h3 { margin:0; font-size:14px; color: var(--muted); font-weight:600;}
+    .kpi .num { font-size:28px; font-weight:800; letter-spacing:.5px;}
+    .kpi .ok { color: var(--ok); } .kpi .err { color: var(--err); }
+    .btns { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;}
+    button { background: #21306b; border:1px solid #2e4099; color:#dbe3ff; padding:8px 12px; border-radius:10px; cursor:pointer; font-weight:600;}
+    button:hover { background:#2940a8 }
+    table { width:100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom:1px solid #233170; padding:10px; text-align:left; vertical-align:top; }
+    th { color:#b9c8ff; font-weight:700; background:#0f1734; position:sticky; top:0; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid #2e4099; background:#1a2550;}
+    .pill.ok { border-color:#2ecc71; background:#113222;}
+    .pill.err{ border-color:#ff6b6b; background:#341417;}
+    .wsbar{ display:flex; gap:8px; align-items:center; flex-wrap:wrap;}
+    .wsdot{ width:10px; height:10px; border-radius:999px; background:#888; }
+    .wsdot.on{ background:#2ecc71;}
+    .scroller{ max-height: 360px; overflow:auto; border-radius: 10px;}
+    .hint{ font-size:12px; color:#9bb1ff; margin-top:6px;}
+    .flex{ display:flex; gap:16px; flex-wrap:wrap; align-items:center; justify-content:space-between;}
+    .small{ font-size:12px; color:#aab8ff;}
+  </style>
+  <!-- SockJS + Stomp (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/stompjs@2.3.3/lib/stomp.min.js"></script>
+</head>
+<body>
+  <header>
+    <div class="flex">
+      <div>
+        <h1>📡 CommService Dashboard</h1>
+        <div class="muted">HTTP • RabbitMQ • WebSocket • PostgreSQL</div>
+      </div>
+      <div class="wsbar">
+        <div id="wsDot" class="wsdot"></div>
+        <div class="small" id="wsState">WebSocket: bağlanıyor…</div>
+      </div>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <div class="row">
+      <div class="card">
+        <div class="kpi"><h3>Toplam Mesaj</h3><div class="num" id="kpiTotal">-</div></div>
+        <div class="kpi"><h3>Başarılı</h3><div class="num ok" id="kpiOk">-</div></div>
+        <div class="kpi"><h3>Hatalı</h3><div class="num err" id="kpiErr">-</div></div>
+        <div class="hint">İstatistikler /api/logs verilerinden hesaplanır.</div>
+        <div class="btns">
+          <button id="btnRefresh">Verileri Yenile</button>
+          <button id="btnAuto">Oto-yenile: Kapalı</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="flex">
+          <h3 style="margin:0;color:#b9c8ff;">Canlı Mesajlar (WebSocket)</h3>
+          <span class="small">Subscribe: <span class="mono">/topic/broadcast</span></span>
+        </div>
+        <div class="scroller" id="liveBox" style="margin-top:8px; background:#0f1734; border:1px solid #233170; padding:10px;">
+          <div class="small">Henüz mesaj yok. Swagger’dan <span class="mono">POST /api/send/ws</span> ile <span class="mono">{ "destination": "/topic/broadcast", "payload": "hello" }</span> gönder.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="flex">
+        <h3 style="margin:0;color:#b9c8ff;">Kayıtlar</h3>
+        <span class="small">Endpoint: <span class="mono">GET /api/logs</span></span>
+      </div>
+      <div class="scroller">
+        <table id="tbl">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Channel</th>
+              <th>Direction</th>
+              <th>Status</th>
+              <th>Target</th>
+              <th>Payload</th>
+              <th>Response</th>
+              <th>Created</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const apiBase = window.location.origin;
+  const logsUrl = apiBase + "/api/logs";
+
+  // ---- Helpers
+  const el = (q) => document.querySelector(q);
+  const fmt = (x) => x ?? "-";
+
+  function renderLogs(logs) {
+    const tb = el("#tbl tbody");
+    tb.innerHTML = "";
+    let ok=0, err=0;
+    logs.forEach(l => {
+      if (l.status === "SUCCESS") ok++; else if (l.status === "FAILED") err++;
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td class="mono">${fmt(l.id)}</td>
+        <td><span class="pill">${fmt(l.channel)}</span></td>
+        <td>${fmt(l.direction)}</td>
+        <td>${l.status==="SUCCESS" ? '<span class="pill ok">SUCCESS</span>' :
+              l.status==="FAILED" ? '<span class="pill err">FAILED</span>' : fmt(l.status)}</td>
+        <td class="mono">${fmt(l.target)}</td>
+        <td class="mono">${fmt(l.payload)}</td>
+        <td class="mono">${fmt(l.responseSummary)}</td>
+        <td class="mono">${fmt(l.createdAt)}</td>
+      `;
+      tb.appendChild(tr);
+    });
+    el("#kpiTotal").textContent = logs.length;
+    el("#kpiOk").textContent = ok;
+    el("#kpiErr").textContent = err;
+  }
+
+  async function loadLogs() {
+    try {
+      const res = await fetch(logsUrl, {headers:{'Accept':'application/json'}});
+      const data = await res.json();
+      renderLogs(data);
+    } catch (e) {
+      console.error("logs fetch failed", e);
+    }
+  }
+
+  // ---- Auto refresh
+  let auto=false, timer=null;
+  function toggleAuto() {
+    auto = !auto;
+    el("#btnAuto").textContent = "Oto-yenile: " + (auto ? "Açık" : "Kapalı");
+    if (timer) clearInterval(timer);
+    if (auto) timer = setInterval(loadLogs, 4000);
+  }
+
+  // ---- Live WebSocket via SockJS + STOMP
+  let stomp = null;
+  function connectWS() {
+    const dot = el("#wsDot"), state = el("#wsState");
+    try {
+      // SockJS endpoint: /ws (Spring WebSocketConfig)
+      const sock = new SockJS(apiBase.replace(/^http/, 'https') + "/ws"); // https ortamında wss kullanır
+      stomp = Stomp.over(sock);
+      stomp.debug = () => {}; // konsol sessiz
+      stomp.connect({}, () => {
+        dot.classList.add("on");
+        state.textContent = "WebSocket: bağlı";
+        stomp.subscribe("/topic/broadcast", (msg) => {
+          const box = el("#liveBox");
+          const div = document.createElement("div");
+          div.className = "mono";
+          div.textContent = `[${new Date().toLocaleTimeString()}] ${msg.body}`;
+          box.appendChild(div);
+          box.scrollTop = box.scrollHeight;
+          // yeni gelen mesajı listeye de yansıtmak istersen buradan /api/logs’u tazeleyebilirsin:
+          // loadLogs();
+        });
+      }, () => {
+        dot.classList.remove("on");
+        state.textContent = "WebSocket: kapandı – 3 sn sonra denenecek";
+        setTimeout(connectWS, 3000);
+      });
+    } catch (e) {
+      state.textContent = "WebSocket: hata – 3 sn sonra denenecek";
+      setTimeout(connectWS, 3000);
+    }
+  }
+
+  // ---- Bindings
+  el("#btnRefresh").addEventListener("click", loadLogs);
+  el("#btnAuto").addEventListener("click", toggleAuto);
+
+  // ---- Boot
+  loadLogs();
+  connectWS();
+</script>
+</body>
+</html>
